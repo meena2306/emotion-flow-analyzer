@@ -4,6 +4,7 @@ import random
 import re
 import sqlite3
 import hashlib
+import html
 from urllib.parse import quote_plus
 from collections import Counter
 from pathlib import Path
@@ -1221,8 +1222,18 @@ def next_supportive_video():
     st.session_state.speech_index = random.choice(choices)
 
 
-def build_support_bot_reply(message: str) -> str:
+def build_support_bot_reply(message: str, history: List[Dict[str, str]] | None = None) -> str:
     lowered = message.lower().strip()
+    history = history or []
+    recent_user_messages = [
+        item.get("content", "").lower().strip()
+        for item in history
+        if item.get("role") == "user" and item.get("content", "").strip()
+    ]
+    prior_user_context = " ".join(recent_user_messages[-3:])
+    combined_context = " ".join(part for part in [prior_user_context, lowered] if part).strip()
+    prior_risk_context = any(term in prior_user_context for term in DIRECT_RISK_TERMS)
+
     if not lowered:
         return "You can tell me anything you are feeling. I will listen gently and stay with you."
     high_risk_chat_terms = DIRECT_RISK_TERMS.union(
@@ -1236,34 +1247,83 @@ def build_support_bot_reply(message: str) -> str:
             "no reason to live",
         }
     )
-    if any(term in lowered for term in high_risk_chat_terms):
+    current_high_risk = any(term in lowered for term in high_risk_chat_terms)
+    follow_up_no_talk_terms = {
+        "i dont want to talk",
+        "i don't want to talk",
+        "dont want to talk",
+        "don't want to talk",
+        "i dont want anyone",
+        "i don't want anyone",
+        "dont want anyone",
+        "don't want anyone",
+        "i dont want to anyone",
+        "i don't want to anyone",
+        "i dont want to talk to anyone",
+        "i don't want to talk to anyone",
+        "leave me alone",
+        "go away",
+    }
+    if prior_risk_context and any(term in lowered for term in follow_up_no_talk_terms):
         return (
-            "I'm really sorry you're feeling this overwhelmed. I'm glad you told me directly. "
-            "This sounds serious, and I want to respond carefully: please contact a trusted person right now and stay with someone if you can. "
-            "If you are in India, you can call Tele-MANAS at 14416 or Kiran at 1800-599-0019 right away."
+            "I hear that talking feels like too much right now. You do not have to explain everything. "
+            "Please just do one immediate safety step: move away from anything you could use to hurt yourself. "
+            "If you are in India, call Tele-MANAS at 14416 and say only, 'I am not safe being alone right now.'"
         )
-    if any(word in lowered for word in {"alone", "lonely", "empty", "nobody"}):
+    if any(term in lowered for term in follow_up_no_talk_terms):
         return (
-            "That sounds painfully lonely. You should not have to carry this by yourself. "
+            "I hear you. If being around people or talking feels too hard right now, that's okay. "
+            "You do not have to do a big conversation. Let's keep it very small for this moment and just focus on getting through the next few minutes safely."
+        )
+    if current_high_risk:
+        return (
+            "I'm really glad you told me. I'm so sorry you're carrying this much pain right now. "
+            "You matter, and you deserve support right away. Please stay near another person if you can, or reach out to someone you trust this minute. "
+            "If you are in India, you can call Tele-MANAS at 14416 or Kiran at 1800-599-0019 right now."
+        )
+    no_support_terms = {
+        "i dont have anyone",
+        "i don't have anyone",
+        "no one",
+        "nobody",
+        "no one cares",
+        "nobody cares",
+        "no friends",
+        "no family",
+    }
+    if any(term in lowered for term in no_support_terms):
+        return (
+            "I'm really sorry this feels so lonely. Even if it seems like no one is close by right now, "
+            "you still deserve care and support. If you are in India, you can call Tele-MANAS at 14416 "
+            "and say, 'I feel alone and need someone with me on the phone right now.'"
+        )
+    if any(word in combined_context for word in {"alone", "lonely", "empty", "nobody"}):
+        if any(term in lowered for term in {"still", "again", "always"}):
+            return (
+                "That kind of loneliness can wear you down so much. Let's keep things very gentle right now: "
+                "take a sip of water, keep your phone near you, and send one short message or call a helpline if talking to someone personal feels too hard."
+            )
+        return (
+            "That sounds really lonely, and I'm sorry you're sitting with that. You should not have to carry this by yourself. "
             "If you can, message one trusted person right now and say, 'I need you with me for a bit.'"
         )
-    if any(word in lowered for word in {"scared", "afraid", "panic", "anxious", "anxiety"}):
+    if any(word in combined_context for word in {"scared", "afraid", "panic", "anxious", "anxiety"}):
         return (
-            "That sounds really overwhelming. Let's make this moment smaller. "
+            "That sounds really scary right now. Let's make this moment feel a little smaller together. "
             "Try one slow breath in for 4 counts and out for 6 counts. "
             "We only need to get through the next minute, not the whole day."
         )
-    if any(word in lowered for word in {"sad", "cry", "hurt", "pain", "down"}):
+    if any(word in combined_context for word in {"sad", "cry", "hurt", "pain", "down"}):
         return (
             "I'm really sorry you're hurting. You do not need to fix everything right now. "
             "Let's think about one very small next step that could help you feel a little safer or steadier."
         )
-    if any(word in lowered for word in {"angry", "frustrated", "mad", "upset"}):
+    if any(word in combined_context for word in {"angry", "frustrated", "mad", "upset"}):
         return (
-            "That makes sense. When feelings get this intense, your body can stay on high alert. "
+            "That makes sense. When feelings get this intense, your whole body can stay on high alert. "
             "If possible, pause for a minute, drink some water, and let your breathing slow down before doing anything else."
         )
-    if any(word in lowered for word in {"tired", "exhausted", "done"}):
+    if any(word in combined_context for word in {"tired", "exhausted", "done"}):
         return (
             "It sounds like you have been carrying too much for too long. Rest is allowed. "
             "Can you move somewhere quieter, sit down, and give yourself one small pause?"
@@ -1291,7 +1351,13 @@ def submit_support_chat_message():
         return
     st.session_state.support_chat_history.append({"role": "user", "content": user_message})
     st.session_state.support_chat_history.append(
-        {"role": "assistant", "content": build_support_bot_reply(user_message)}
+        {
+            "role": "assistant",
+            "content": build_support_bot_reply(
+                user_message,
+                st.session_state.support_chat_history[:-1],
+            ),
+        }
     )
     st.session_state.support_chat_sidebar_input = ""
 
@@ -1328,10 +1394,12 @@ def render_support_chatbot_sidebar_panel():
     for item in st.session_state.support_chat_history:
         role_class = "assistant" if item["role"] == "assistant" else "user"
         label = "Support Bot" if item["role"] == "assistant" else "You"
+        safe_label = html.escape(label)
+        safe_content = html.escape(item["content"]).replace("\n", "<br>")
         st.markdown(
             f"""
             <div class="support-chat-bubble {role_class}">
-                <strong>{label}</strong><br>{item["content"]}
+                <strong>{safe_label}</strong><br>{safe_content}
             </div>
             """,
             unsafe_allow_html=True,
